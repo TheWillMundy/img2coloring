@@ -8,7 +8,13 @@ export const runtime = "nodejs";
 
 const PROMPT =
   "Turn this photo into a clean, high-contrast coloring book illustration. Keep the main shapes and contours, remove shading and textures, use bold black outlines, and leave a white background. Maintain the EXACT aspect ratio of the original photo, high-resolution.";
-const DEFAULT_IMAGE_MODEL = "gpt-image-1";
+const DEFAULT_IMAGE_MODEL = "images-1.5";
+
+const OPENAI_SIZE_BY_RATIO: Record<string, string> = {
+  "1:1": "1024x1024",
+  "3:2": "1536x1024",
+  "2:3": "1024x1536",
+};
 
 type ProviderName = "openai" | "google";
 
@@ -29,27 +35,7 @@ const inferProvider = (
   }
 
   const normalized = modelId.trim().toLowerCase();
-  if (normalized.startsWith("google/")) return "google";
-  if (normalized.startsWith("openai/")) return "openai";
-
-  if (
-    normalized.startsWith("gemini-") ||
-    normalized.startsWith("imagen-") ||
-    normalized.startsWith("google-")
-  ) {
-    return "google";
-  }
-
-  if (
-    normalized.startsWith("gpt-") ||
-    normalized.startsWith("dall-e") ||
-    normalized.startsWith("o1") ||
-    normalized.startsWith("o3") ||
-    normalized.startsWith("o4")
-  ) {
-    return "openai";
-  }
-
+  if (normalized.startsWith("gemini-")) return "google";
   return "openai";
 };
 
@@ -72,7 +58,6 @@ const bufferFromBase64 = (base64: string) => {
 };
 
 export async function POST(req: Request) {
-  let imageUrl: string | undefined;
   const providerEnv = process.env.IMAGE_PROVIDER?.trim().toLowerCase();
   const rawModel = process.env.IMAGE_MODEL ?? DEFAULT_IMAGE_MODEL;
   const provider = inferProvider(providerEnv, rawModel);
@@ -94,40 +79,41 @@ export async function POST(req: Request) {
     );
   }
 
+  let imageFile: File | null = null;
+  let aspectRatio: string | undefined;
+
   try {
-    const body = await req.json();
-    imageUrl = typeof body?.imageUrl === "string" ? body.imageUrl : undefined;
-  } catch (error) {
+    const formData = await req.formData();
+    const imageEntry = formData.get("image");
+    if (imageEntry && typeof imageEntry !== "string") {
+      imageFile = imageEntry;
+    }
+    const ratioEntry = formData.get("aspectRatio");
+    if (typeof ratioEntry === "string") {
+      aspectRatio = ratioEntry.trim();
+    }
+  } catch {
     return NextResponse.json(
-      { error: "Invalid JSON payload." },
+      { error: "Invalid form payload." },
       { status: 400 }
     );
   }
 
-  if (!imageUrl || !/^https?:\/\//i.test(imageUrl)) {
+  if (!imageFile) {
     return NextResponse.json(
-      { error: "Missing or invalid imageUrl." },
+      { error: "Missing image file." },
       { status: 400 }
     );
   }
 
-  const sourceResponse = await fetch(imageUrl, {
-    headers: {
-      "User-Agent": "img2coloringbook/0.1",
-    },
-  });
-  if (!sourceResponse.ok) {
+  if (!imageFile.type.startsWith("image/")) {
     return NextResponse.json(
-      {
-        error: "Failed to fetch source image.",
-        status: sourceResponse.status,
-        statusText: sourceResponse.statusText,
-      },
+      { error: "Unsupported image type." },
       { status: 400 }
     );
   }
 
-  const arrayBuffer = await sourceResponse.arrayBuffer();
+  const arrayBuffer = await imageFile.arrayBuffer();
   const sourceImage = Buffer.from(arrayBuffer);
 
   const saveToBlob = async (
@@ -165,53 +151,19 @@ export async function POST(req: Request) {
         );
       }
 
-      const google = createGoogleGenerativeAI({
-        apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-      });
-
       const normalizedModel = modelId.toLowerCase();
-      const isImagenModel = normalizedModel.startsWith("imagen-");
-      const isGeminiModel = normalizedModel.startsWith("gemini-");
-
-      if (!isImagenModel && !isGeminiModel) {
+      if (!normalizedModel.startsWith("gemini-")) {
         return NextResponse.json(
           {
-            error:
-              "IMAGE_MODEL must be a Gemini image model (gemini-*) or Imagen model (imagen-*).",
+            error: "IMAGE_MODEL must be a Gemini image model (gemini-*).",
           },
           { status: 400 }
         );
       }
 
-      if (isImagenModel) {
-        const { image, images } = await generateImage({
-          model: google.image(modelId),
-          prompt: PROMPT,
-        });
-
-        const base64 = image?.base64 ?? images?.[0]?.base64;
-        const mediaType =
-          image?.mediaType ?? images?.[0]?.mediaType ?? "image/png";
-
-        if (!base64) {
-          return NextResponse.json(
-            { error: "No image returned from model." },
-            { status: 502 }
-          );
-        }
-
-        const blobUrl = await saveToBlob(
-          base64,
-          mediaType,
-          "google",
-          modelId
-        );
-
-        return NextResponse.json({
-          image: toDataUrl(base64, mediaType),
-          blobUrl,
-        });
-      }
+      const google = createGoogleGenerativeAI({
+        apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+      });
 
       const result = await generateText({
         model: google(modelId),
@@ -261,12 +213,16 @@ export async function POST(req: Request) {
     }
 
     const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const openaiSize =
+      (aspectRatio && OPENAI_SIZE_BY_RATIO[aspectRatio]) || "1024x1024";
+
     const { image, images } = await generateImage({
       model: openai.image(modelId),
       prompt: {
         text: PROMPT,
         images: [sourceImage],
       },
+      size: openaiSize,
     });
 
     const base64 = image?.base64 ?? images?.[0]?.base64;

@@ -15,6 +15,7 @@ import gsap from "gsap";
 type SliderProps = {
   beforeSrc: string;
   afterSrc: string;
+  aspectRatio?: number;
   title?: string;
   subtitle?: string;
   credit?: string;
@@ -26,6 +27,7 @@ type SliderProps = {
 export default function GSAPImageCompareSliderDemo({
   beforeSrc,
   afterSrc,
+  aspectRatio = 16 / 9,
   title,
   subtitle,
   credit,
@@ -331,7 +333,7 @@ export default function GSAPImageCompareSliderDemo({
         ref={containerRef}
         className="relative w-full overflow-hidden rounded-3xl shadow-lg bg-neutral-100 select-none"
         style={{
-          aspectRatio: "16 / 9",
+          aspectRatio,
           touchAction: "none",
           cursor: "ew-resize",
           userSelect: "none",
