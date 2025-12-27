@@ -20,6 +20,28 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## AI Configuration
+
+Create a `.env.local` file to control the image provider and model:
+
+```bash
+OPENAI_API_KEY=your_openai_key
+GOOGLE_GENERATIVE_AI_API_KEY=your_google_ai_studio_key
+BLOB_READ_WRITE_TOKEN=your_vercel_blob_token
+IMAGE_MODEL=gpt-image-1
+# Optional override: "openai" or "google"
+IMAGE_PROVIDER=openai
+# Optional: persist generated images to Vercel Blob
+SAVE_TO_BLOB=true
+```
+
+Notes:
+- `IMAGE_MODEL` defaults to `gpt-image-1` if not set.
+- For Nano Banana Pro (Gemini 3 Pro Image Preview), set `IMAGE_MODEL=gemini-3-pro-image-preview`.
+- Gemini image models (`gemini-*`) support image-to-image edits; Imagen models (`imagen-*`) are text-only.
+- If `IMAGE_PROVIDER` is not set, the app infers the provider from `IMAGE_MODEL`.
+- If `SAVE_TO_BLOB=true`, the API will save generated images to Vercel Blob and return a `blobUrl`.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

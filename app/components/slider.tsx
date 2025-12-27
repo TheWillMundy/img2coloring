@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { type ReactNode, useEffect, useMemo, useRef } from "react";
 import gsap from "gsap";
 
 /**
@@ -12,15 +12,33 @@ import gsap from "gsap";
  * - On drag release: optional inertia tween (only if there was real drag velocity)
  */
 
-export default function GSAPImageCompareSliderDemo() {
+type SliderProps = {
+  beforeSrc: string;
+  afterSrc: string;
+  title?: string;
+  subtitle?: string;
+  credit?: string;
+  tip?: string;
+  className?: string;
+  overlay?: ReactNode;
+};
+
+export default function GSAPImageCompareSliderDemo({
+  beforeSrc,
+  afterSrc,
+  title,
+  subtitle,
+  credit,
+  tip,
+  className,
+  overlay,
+}: SliderProps) {
   const images = useMemo(
     () => ({
-      before:
-        "https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=1600&h=900&q=80",
-      after:
-        "https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=1600&h=900&q=80",
+      before: beforeSrc,
+      after: afterSrc,
     }),
-    []
+    [beforeSrc, afterSrc]
   );
 
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -245,7 +263,7 @@ export default function GSAPImageCompareSliderDemo() {
         s.lastT = now;
         s.samples += 1;
 
-        // If we see multiple samples while down, it’s effectively a drag.
+        // If we see multiple samples while down, it's effectively a drag.
         if (s.samples > 1 && !s.moved) {
           s.moved = true;
           killClickTween();
@@ -294,95 +312,97 @@ export default function GSAPImageCompareSliderDemo() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const rootClassName = className ? `w-full ${className}` : "w-full";
+  const hasHeader = Boolean(title || subtitle || credit);
+
   return (
-    <div className="w-full min-h-[80vh] flex items-center justify-center p-6">
-      <div className="w-full max-w-4xl">
+    <div className={rootClassName}>
+      {hasHeader ? (
         <div className="mb-3 flex items-end justify-between gap-4">
           <div>
-            <div className="text-xl font-semibold">Before / After slider (GSAP)</div>
-            <div className="text-sm text-neutral-500">Drag to scrub • tap to jump • flick to glide</div>
+            {title ? <div className="text-xl font-semibold">{title}</div> : null}
+            {subtitle ? <div className="text-sm text-neutral-500">{subtitle}</div> : null}
           </div>
-          <div className="text-xs text-neutral-500">Unsplash demo images</div>
+          {credit ? <div className="text-xs text-neutral-500">{credit}</div> : null}
         </div>
+      ) : null}
+
+      <div
+        ref={containerRef}
+        className="relative w-full overflow-hidden rounded-3xl shadow-lg bg-neutral-100 select-none"
+        style={{
+          aspectRatio: "16 / 9",
+          touchAction: "none",
+          cursor: "ew-resize",
+          userSelect: "none",
+          WebkitUserSelect: "none",
+        }}
+        aria-label="Image comparison slider"
+      >
+        <img
+          src={images.after}
+          alt="After"
+          className="absolute inset-0 h-full w-full object-cover"
+          style={{ pointerEvents: "none" }}
+          draggable={false}
+          decoding="async"
+          loading="eager"
+        />
+
+        <img
+          ref={overlayImgRef}
+          src={images.before}
+          alt="Before"
+          className="absolute inset-0 h-full w-full object-cover"
+          style={{
+            clipPath: "inset(0 50% 0 0)",
+            willChange: "clip-path",
+            pointerEvents: "none",
+          }}
+          draggable={false}
+          decoding="async"
+          loading="eager"
+        />
 
         <div
-          ref={containerRef}
-          className="relative w-full overflow-hidden rounded-3xl shadow-lg bg-neutral-100 select-none"
-          style={{
-            aspectRatio: "16 / 9",
-            touchAction: "none",
-            cursor: "ew-resize",
-            userSelect: "none",
-            WebkitUserSelect: "none",
-          }}
-          aria-label="Image comparison slider"
+          ref={handleRef}
+          className="absolute top-0 bottom-0 z-10 pointer-events-none"
+          style={{ width: 44, willChange: "transform" }}
+          aria-hidden
         >
-          <img
-            src={images.after}
-            alt="After"
-            className="absolute inset-0 h-full w-full object-cover"
-            style={{ pointerEvents: "none" }}
-            draggable={false}
-            decoding="async"
-            loading="eager"
-          />
-
-          <img
-            ref={overlayImgRef}
-            src={images.before}
-            alt="Before"
-            className="absolute inset-0 h-full w-full object-cover"
-            style={{
-              clipPath: "inset(0 50% 0 0)",
-              willChange: "clip-path",
-              pointerEvents: "none",
-            }}
-            draggable={false}
-            decoding="async"
-            loading="eager"
-          />
-
-          <div
-            ref={handleRef}
-            className="absolute top-0 bottom-0 z-10 pointer-events-none"
-            style={{ width: 44, willChange: "transform" }}
-            aria-hidden
-          >
-            <div className="absolute left-1/2 top-0 bottom-0 w-[2px] -translate-x-1/2 bg-white/80 shadow" />
-            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-              <div className="flex items-center gap-2 rounded-full bg-white/90 backdrop-blur px-3 py-2 shadow-lg">
-                <div className="h-2 w-2 rounded-full bg-neutral-900/70" />
-                <div className="text-[11px] font-medium tracking-wide text-neutral-700">DRAG</div>
-                <div className="h-2 w-2 rounded-full bg-neutral-900/70" />
-              </div>
+          <div className="absolute left-1/2 top-0 bottom-0 w-[2px] -translate-x-1/2 bg-white/80 shadow" />
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+            <div className="flex items-center gap-2 rounded-full bg-white/90 backdrop-blur px-3 py-2 shadow-lg">
+              <div className="h-2 w-2 rounded-full bg-neutral-900/70" />
+              <div className="text-[11px] font-medium tracking-wide text-neutral-700">DRAG</div>
+              <div className="h-2 w-2 rounded-full bg-neutral-900/70" />
             </div>
           </div>
-
-          <input
-            ref={rangeRef}
-            type="range"
-            min={0}
-            max={10000}
-            step={1}
-            defaultValue={5000}
-            className="absolute inset-0 z-20 w-full h-full opacity-0"
-            style={{
-              touchAction: "none",
-              WebkitAppearance: "none",
-              appearance: "none",
-              background: "transparent",
-            }}
-            aria-label="Comparison slider"
-          />
-
-          <div className="pointer-events-none absolute inset-0 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.06)]" />
-          <div className="pointer-events-none absolute inset-0 [background:radial-gradient(80%_80%_at_50%_50%,rgba(0,0,0,0)_0%,rgba(0,0,0,0.18)_100%)] opacity-40" />
         </div>
 
-        <div className="mt-3 text-xs text-neutral-500">
-          Tip: tap/click to jump (tween), drag to scrub (direct), flick to glide (inertia).
-        </div>
+        <input
+          ref={rangeRef}
+          type="range"
+          min={0}
+          max={10000}
+          step={1}
+          defaultValue={5000}
+          className="absolute inset-0 z-20 w-full h-full opacity-0"
+          style={{
+            touchAction: "none",
+            WebkitAppearance: "none",
+            appearance: "none",
+            background: "transparent",
+          }}
+          aria-label="Comparison slider"
+        />
+
+        <div className="pointer-events-none absolute inset-0 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.06)]" />
+        <div className="pointer-events-none absolute inset-0 [background:radial-gradient(80%_80%_at_50%_50%,rgba(0,0,0,0)_0%,rgba(0,0,0,0.18)_100%)] opacity-40" />
+        {overlay}
       </div>
+
+      {tip ? <div className="mt-3 text-xs text-neutral-500">{tip}</div> : null}
     </div>
   );
 }
