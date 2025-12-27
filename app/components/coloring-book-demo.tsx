@@ -13,6 +13,7 @@ import GSAPImageCompareSliderDemo from "./slider";
 const MAX_EDGE = 1024;
 const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const DEFAULT_RATIO = 3 / 2;
+const CUSTOM_ID = "custom";
 const RATIO_CANDIDATES = [
   { label: "1:1", value: 1 },
   { label: "3:2", value: 3 / 2 },
@@ -24,14 +25,53 @@ type GenerationStatus = "idle" | "loading" | "ready" | "error";
 type Stage = "upload" | "preview" | "result";
 
 type ProcessedImage = {
-  blob: Blob;
+  id: string;
+  blob?: Blob;
   previewUrl: string;
   width: number;
   height: number;
   ratioLabel: string;
   ratioValue: number;
   name: string;
+  sourceUrl?: string;
+  isObjectUrl: boolean;
 };
+
+type SampleSet = {
+  id: string;
+  name: string;
+  ratioLabel: string;
+  ratioValue: number;
+  originalSrc: string;
+  generatedSrc: string;
+};
+
+const SAMPLES: SampleSet[] = [
+  {
+    id: "sample-01",
+    name: "Alpine Lake",
+    ratioLabel: "3:2",
+    ratioValue: DEFAULT_RATIO,
+    originalSrc: "/samples/sample-01-original.jpg",
+    generatedSrc: "/samples/sample-01-line.png",
+  },
+  {
+    id: "sample-02",
+    name: "City Walk",
+    ratioLabel: "3:2",
+    ratioValue: DEFAULT_RATIO,
+    originalSrc: "/samples/sample-02-original.jpg",
+    generatedSrc: "/samples/sample-02-line.png",
+  },
+  {
+    id: "sample-03",
+    name: "Desert Road",
+    ratioLabel: "3:2",
+    ratioValue: DEFAULT_RATIO,
+    originalSrc: "/samples/sample-03-original.jpg",
+    generatedSrc: "/samples/sample-03-line.png",
+  },
+];
 
 const pickRatio = (ratio: number) => {
   return RATIO_CANDIDATES.reduce((closest, candidate) => {
@@ -163,6 +203,7 @@ const buildProcessedImage = async (file: File): Promise<ProcessedImage> => {
   const baseName = file.name.replace(/\.[^/.]+$/, "").trim() || "photo";
 
   return {
+    id: CUSTOM_ID,
     blob,
     previewUrl,
     width: targetWidth,
@@ -170,12 +211,14 @@ const buildProcessedImage = async (file: File): Promise<ProcessedImage> => {
     ratioLabel: target.label,
     ratioValue: target.value,
     name: `${baseName}-cropped.jpg`,
+    isObjectUrl: true,
   };
 };
 
 export default function ColoringBookDemo() {
   const [stage, setStage] = useState<Stage>("upload");
   const [processed, setProcessed] = useState<ProcessedImage | null>(null);
+  const [selectedId, setSelectedId] = useState<string>(CUSTOM_ID);
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [generatedSrc, setGeneratedSrc] = useState<string | null>(null);
@@ -189,12 +232,15 @@ export default function ColoringBookDemo() {
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
+    const previewUrl = processed?.previewUrl;
+    const isObjectUrl = processed?.isObjectUrl;
+
     return () => {
-      if (processed?.previewUrl) {
-        URL.revokeObjectURL(processed.previewUrl);
+      if (previewUrl && isObjectUrl) {
+        URL.revokeObjectURL(previewUrl);
       }
     };
-  }, [processed?.previewUrl]);
+  }, [processed?.previewUrl, processed?.isObjectUrl]);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -233,9 +279,67 @@ export default function ColoringBookDemo() {
     };
   }, [frameSize, ratioValue]);
 
+  const preloadSampleBlob = useCallback(async (sample: SampleSet) => {
+    try {
+      const response = await fetch(sample.originalSrc);
+      if (!response.ok) return;
+      const blob = await response.blob();
+      setProcessed((prev) =>
+        prev && prev.id === sample.id ? { ...prev, blob } : prev
+      );
+    } catch {
+      // Ignore sample prefetch errors.
+    }
+  }, []);
+
+  const ensureSourceBlob = useCallback(async (image: ProcessedImage) => {
+    if (image.blob) return image.blob;
+    if (!image.sourceUrl) {
+      throw new Error("Missing source image.");
+    }
+
+    const response = await fetch(image.sourceUrl);
+    if (!response.ok) {
+      throw new Error("Failed to load the source image.");
+    }
+
+    const blob = await response.blob();
+    setProcessed((prev) =>
+      prev && prev.id === image.id ? { ...prev, blob } : prev
+    );
+    return blob;
+  }, []);
+
   const openPicker = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
+
+  const selectSample = useCallback(
+    (sample: SampleSet) => {
+      abortRef.current?.abort();
+      setSelectedId(sample.id);
+      setStage("result");
+      setProcessed({
+        id: sample.id,
+        previewUrl: sample.originalSrc,
+        width: 0,
+        height: 0,
+        ratioLabel: sample.ratioLabel,
+        ratioValue: sample.ratioValue,
+        name: `${sample.id}.jpg`,
+        sourceUrl: sample.originalSrc,
+        isObjectUrl: false,
+      });
+      setGeneratedSrc(sample.generatedSrc);
+      setBlobUrl(null);
+      setStatus("ready");
+      setGenerationError(null);
+      setUploadError(null);
+      setIsDragging(false);
+      preloadSampleBlob(sample);
+    },
+    [preloadSampleBlob]
+  );
 
   const handleFile = useCallback(async (file: File) => {
     if (!ACCEPTED_TYPES.includes(file.type)) {
@@ -249,6 +353,7 @@ export default function ColoringBookDemo() {
     }
 
     abortRef.current?.abort();
+    setSelectedId(CUSTOM_ID);
     setIsProcessing(true);
     setUploadError(null);
     setIsDragging(false);
@@ -307,8 +412,9 @@ export default function ColoringBookDemo() {
     setBlobUrl(null);
 
     try {
+      const sourceBlob = await ensureSourceBlob(processed);
       const formData = new FormData();
-      formData.append("image", processed.blob, processed.name);
+      formData.append("image", sourceBlob, processed.name);
       formData.append("aspectRatio", processed.ratioLabel);
 
       const response = await fetch("/api/coloring", {
@@ -340,7 +446,7 @@ export default function ColoringBookDemo() {
         abortRef.current = null;
       }
     }
-  }, [processed]);
+  }, [ensureSourceBlob, processed]);
 
   const handleDownload = useCallback(async () => {
     if (!generatedSrc) return;
@@ -425,83 +531,136 @@ export default function ColoringBookDemo() {
         </p>
       </header>
 
-      <div className="relative mt-10 rounded-[32px] border border-white/70 bg-white/70 p-4 shadow-[0_25px_80px_rgba(17,12,8,0.2)] backdrop-blur">
-        <div className="pointer-events-none absolute -inset-10 rounded-[40px] bg-[radial-gradient(60%_60%_at_50%_30%,rgba(255,255,255,0.7),rgba(255,255,255,0))]" />
-        <div
-          ref={frameRef}
-          className="relative flex h-[clamp(320px,58vh,720px)] items-center justify-center"
-        >
-          {stage === "upload" ? (
-            <div
-              className={`relative flex h-full w-full flex-col items-center justify-center gap-4 rounded-3xl border-2 border-dashed px-6 py-10 text-center transition ${
-                isDragging
-                  ? "border-amber-300/80 bg-amber-50/70"
-                  : "border-neutral-200/80 bg-white/80"
-              }`}
-              style={fitStyle}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setIsDragging(true);
-              }}
-              onDragLeave={() => setIsDragging(false)}
-              onDrop={handleDrop}
+      <div className="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-[10rem_minmax(0,1fr)_10rem] lg:items-center">
+        <div className="flex w-full justify-center lg:col-start-1 lg:self-center">
+          <div className="grid w-full max-w-[520px] grid-cols-4 gap-3 lg:max-w-none lg:grid-cols-1 lg:gap-4">
+            <button
+              type="button"
               onClick={openPicker}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                openPicker();
-                }
-              }}
-              role="button"
-              tabIndex={0}
+              aria-label="Upload your own photo"
+              className={`group relative aspect-[3/2] w-full overflow-hidden rounded-2xl border-2 border-dashed bg-white/80 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
+                selectedId === CUSTOM_ID
+                  ? "border-amber-400/80 ring-2 ring-amber-400/80"
+                  : "border-neutral-200/80 ring-1 ring-black/5"
+              }`}
             >
-              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white shadow">
-                <span className="text-xl font-semibold text-neutral-700">+</span>
+              <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-neutral-600">
+                +
               </div>
-              <div className="text-base font-semibold text-neutral-800">
-                Drag & drop your photo
-              </div>
-              <div className="text-xs uppercase tracking-[0.3em] text-neutral-500">
-                JPG, PNG, or WebP
-              </div>
-              {uploadError ? (
-                <div className="text-xs text-rose-500">{uploadError}</div>
-              ) : (
-                <div className="text-xs text-neutral-500">
-                  Click anywhere to browse.
-                </div>
-              )}
-            </div>
-          ) : stage === "preview" ? (
-            <div
-              className="relative overflow-hidden rounded-3xl bg-neutral-900/5 shadow-lg"
-              style={fitStyle}
-            >
-            <img
-              src={processed?.previewUrl ?? placeholder}
-              alt="Prepared upload"
-              className="absolute inset-0 h-full w-full object-cover"
-            />
-              <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-neutral-900/40 to-transparent px-6 py-5">
-                <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold uppercase tracking-[0.3em] text-white">
-                  <span className="h-2 w-2 rounded-full bg-amber-300" />
-                  Cropped to {processed?.ratioLabel}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div style={fitStyle} className="flex items-center justify-center">
-              <GSAPImageCompareSliderDemo
-                className="relative"
-                beforeSrc={processed?.previewUrl ?? placeholder}
-                afterSrc={generatedSrc ?? placeholder}
-                aspectRatio={ratioValue}
-                overlay={overlay}
-              />
-            </div>
-          )}
-          {processingOverlay}
+            </button>
+            {SAMPLES.map((sample) => {
+              const isActive = selectedId === sample.id;
+              return (
+                <button
+                  key={sample.id}
+                  type="button"
+                  onClick={() => selectSample(sample)}
+                  aria-label={`Use sample ${sample.name}`}
+                  className={`group relative aspect-[3/2] w-full overflow-hidden rounded-2xl border border-white/70 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
+                    isActive ? "ring-2 ring-amber-400/80" : "ring-1 ring-black/5"
+                  }`}
+                >
+                  <img
+                    src={sample.generatedSrc}
+                    alt=""
+                    className="absolute inset-0 h-full w-full object-cover"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <img
+                    src={sample.originalSrc}
+                    alt=""
+                    className="absolute inset-0 h-full w-full object-cover"
+                    style={{ clipPath: "inset(0 50% 0 0)" }}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </button>
+              );
+            })}
+          </div>
         </div>
+
+        <div className="min-w-0 lg:col-start-2">
+          <div
+            ref={frameRef}
+            className="relative flex h-[clamp(300px,56vh,720px)] items-center justify-center"
+          >
+            {stage === "upload" ? (
+              <div
+                className={`relative flex h-full w-full flex-col items-center justify-center gap-4 rounded-3xl border-2 border-dashed px-6 py-10 text-center transition ${
+                  isDragging
+                    ? "border-amber-300/80 bg-amber-50/70"
+                    : "border-neutral-200/80 bg-white/80"
+                }`}
+                style={fitStyle}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={handleDrop}
+                onClick={openPicker}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    openPicker();
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+              >
+                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white shadow">
+                  <span className="text-xl font-semibold text-neutral-700">
+                    +
+                  </span>
+                </div>
+                <div className="text-base font-semibold text-neutral-800">
+                  Drag & drop your photo
+                </div>
+                <div className="text-xs uppercase tracking-[0.3em] text-neutral-500">
+                  JPG, PNG, or WebP
+                </div>
+                {uploadError ? (
+                  <div className="text-xs text-rose-500">{uploadError}</div>
+                ) : (
+                  <div className="text-xs text-neutral-500">
+                    Click anywhere to browse.
+                  </div>
+                )}
+              </div>
+            ) : stage === "preview" ? (
+              <div
+                className="relative overflow-hidden rounded-3xl bg-neutral-900/5 shadow-lg"
+                style={fitStyle}
+              >
+                <img
+                  src={processed?.previewUrl ?? placeholder}
+                  alt="Prepared upload"
+                  className="absolute inset-0 h-full w-full object-cover"
+                />
+                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-neutral-900/40 to-transparent px-6 py-5">
+                  <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold uppercase tracking-[0.3em] text-white">
+                    <span className="h-2 w-2 rounded-full bg-amber-300" />
+                    Cropped to {processed?.ratioLabel}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div style={fitStyle} className="flex items-center justify-center">
+                <GSAPImageCompareSliderDemo
+                  className="relative"
+                  beforeSrc={processed?.previewUrl ?? placeholder}
+                  afterSrc={generatedSrc ?? placeholder}
+                  aspectRatio={ratioValue}
+                  overlay={overlay}
+                />
+              </div>
+            )}
+            {processingOverlay}
+          </div>
+        </div>
+        <div className="hidden lg:block" />
       </div>
 
       <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
