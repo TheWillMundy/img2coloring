@@ -8,7 +8,8 @@ export const runtime = "nodejs";
 
 const PROMPT =
   "Turn this photo into a clean, high-contrast coloring book illustration. Keep the main shapes and contours, remove shading and textures, use bold black outlines, and leave a white background. Maintain the EXACT aspect ratio of the original photo, high-resolution.";
-const DEFAULT_IMAGE_MODEL = "images-1.5";
+const DEFAULT_IMAGE_MODEL = "gpt-image-1.5";
+const DEFAULT_FULL_MODEL = `openai/${DEFAULT_IMAGE_MODEL}`;
 
 const OPENAI_SIZE_BY_RATIO: Record<string, string> = {
   "1:1": "1024x1024",
@@ -35,6 +36,8 @@ const inferProvider = (
   }
 
   const normalized = modelId.trim().toLowerCase();
+  if (normalized.startsWith("google/")) return "google";
+  if (normalized.startsWith("openai/")) return "openai";
   if (normalized.startsWith("gemini-")) return "google";
   return "openai";
 };
@@ -57,11 +60,29 @@ const bufferFromBase64 = (base64: string) => {
   return Buffer.from(raw, "base64");
 };
 
+const normalizeModelSelection = (modelId: string) => {
+  const trimmed = modelId.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === "gpt-image-1.5" || lower === "openai/gpt-image-1.5") {
+    return "openai/gpt-image-1.5";
+  }
+  if (
+    lower === "gemini-3-pro-image-preview" ||
+    lower === "google/gemini-3-pro-image-preview"
+  ) {
+    return "google/gemini-3-pro-image-preview";
+  }
+  return DEFAULT_FULL_MODEL;
+};
+
 export async function POST(req: Request) {
   const providerEnv = process.env.IMAGE_PROVIDER?.trim().toLowerCase();
-  const rawModel = process.env.IMAGE_MODEL ?? DEFAULT_IMAGE_MODEL;
-  const provider = inferProvider(providerEnv, rawModel);
-  const modelId = stripProviderPrefix(rawModel);
+  const envModel = process.env.IMAGE_MODEL ?? DEFAULT_IMAGE_MODEL;
+  let imageFile: File | null = null;
+  let aspectRatio: string | undefined;
+  let requestModel: string | undefined;
+  let requestProvider: string | undefined;
+  let requestApiKey: string | undefined;
   const shouldSaveToBlob = process.env.SAVE_TO_BLOB === "true";
   const blobToken = process.env.BLOB_READ_WRITE_TOKEN;
 
@@ -79,9 +100,6 @@ export async function POST(req: Request) {
     );
   }
 
-  let imageFile: File | null = null;
-  let aspectRatio: string | undefined;
-
   try {
     const formData = await req.formData();
     const imageEntry = formData.get("image");
@@ -91,6 +109,18 @@ export async function POST(req: Request) {
     const ratioEntry = formData.get("aspectRatio");
     if (typeof ratioEntry === "string") {
       aspectRatio = ratioEntry.trim();
+    }
+    const modelEntry = formData.get("imageModel");
+    if (typeof modelEntry === "string") {
+      requestModel = modelEntry.trim();
+    }
+    const providerEntry = formData.get("imageProvider");
+    if (typeof providerEntry === "string") {
+      requestProvider = providerEntry.trim().toLowerCase();
+    }
+    const apiKeyEntry = formData.get("apiKey");
+    if (typeof apiKeyEntry === "string") {
+      requestApiKey = apiKeyEntry.trim();
     }
   } catch {
     return NextResponse.json(
@@ -115,6 +145,9 @@ export async function POST(req: Request) {
 
   const arrayBuffer = await imageFile.arrayBuffer();
   const sourceImage = Buffer.from(arrayBuffer);
+  const rawModel = normalizeModelSelection(requestModel || envModel);
+  const provider = inferProvider(requestProvider ?? providerEnv, rawModel);
+  const modelId = stripProviderPrefix(rawModel);
 
   const saveToBlob = async (
     base64: string,
@@ -142,9 +175,22 @@ export async function POST(req: Request) {
     return blob.url;
   };
 
+  if (
+    requestProvider &&
+    requestProvider !== "openai" &&
+    requestProvider !== "google"
+  ) {
+    return NextResponse.json(
+      { error: "Invalid imageProvider. Use 'openai' or 'google'." },
+      { status: 400 }
+    );
+  }
+
   try {
     if (provider === "google") {
-      if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+      const googleKey =
+        requestApiKey || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+      if (!googleKey) {
         return NextResponse.json(
           { error: "Missing GOOGLE_GENERATIVE_AI_API_KEY." },
           { status: 500 }
@@ -161,9 +207,7 @@ export async function POST(req: Request) {
         );
       }
 
-      const google = createGoogleGenerativeAI({
-        apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-      });
+      const google = createGoogleGenerativeAI({ apiKey: googleKey });
 
       const result = await generateText({
         model: google(modelId),
@@ -205,14 +249,15 @@ export async function POST(req: Request) {
       });
     }
 
-    if (!process.env.OPENAI_API_KEY) {
+    const openaiKey = requestApiKey || process.env.OPENAI_API_KEY;
+    if (!openaiKey) {
       return NextResponse.json(
         { error: "Missing OPENAI_API_KEY." },
         { status: 500 }
       );
     }
 
-    const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const openai = createOpenAI({ apiKey: openaiKey });
     const openaiSize =
       (aspectRatio && OPENAI_SIZE_BY_RATIO[aspectRatio]) || "1024x1024";
 
