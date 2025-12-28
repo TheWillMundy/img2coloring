@@ -9,22 +9,28 @@ import {
   useState,
 } from "react";
 import GSAPImageCompareSliderDemo from "./slider";
-import { getImageRecord, saveImageRecord } from "../lib/image-store";
+import {
+  deleteImageRecord,
+  getImageRecord,
+  saveImageRecord,
+} from "../lib/image-store";
 
 const MAX_EDGE = 1024;
 const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const DEFAULT_RATIO = 3 / 2;
 const CUSTOM_ID = "custom";
 const DEFAULT_MODEL = "openai/gpt-image-1.5";
-const SETTINGS_STORAGE_KEY = "img2coloringbook.settings.v1";
-const UPLOADS_STORAGE_KEY = "img2coloringbook.uploads.v1";
-const SELECTED_STORAGE_KEY = "img2coloringbook.selected.v1";
-const FREE_GENERATION_KEY = "img2coloringbook.free-generation-used.v1";
+const SETTINGS_STORAGE_KEY = "etch.settings.v1";
+const UPLOADS_STORAGE_KEY = "etch.uploads.v1";
+const SELECTED_STORAGE_KEY = "etch.selected.v1";
+const FREE_GENERATION_KEY = "etch.free-generation-used.v1";
+const PENDING_GENERATION_KEY = "etch.pending-generation.v1";
 const RATIO_CANDIDATES = [
   { label: "1:1", value: 1 },
   { label: "3:2", value: 3 / 2 },
   { label: "2:3", value: 2 / 3 },
 ];
+const MAX_RATIO = Math.max(...RATIO_CANDIDATES.map((ratio) => ratio.value));
 
 type GenerationStatus = "idle" | "loading" | "ready" | "error";
 
@@ -375,6 +381,59 @@ const writeFreeGenerationUsed = () => {
   }
 };
 
+const readPendingGenerationIds = () => {
+  if (typeof window === "undefined") return [] as string[];
+  try {
+    const raw = window.localStorage.getItem(PENDING_GENERATION_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((entry) => typeof entry === "string");
+    }
+    if (parsed && Array.isArray(parsed.ids)) {
+      return parsed.ids.filter((entry: unknown) => typeof entry === "string");
+    }
+    return [];
+  } catch {
+    return [] as string[];
+  }
+};
+
+const writePendingGeneration = (id: string) => {
+  try {
+    const current = readPendingGenerationIds();
+    if (current.includes(id)) return;
+    const next = [...current, id];
+    window.localStorage.setItem(
+      PENDING_GENERATION_KEY,
+      JSON.stringify({ ids: next, at: Date.now() })
+    );
+  } catch {
+    // Ignore persistence errors.
+  }
+};
+
+const clearPendingGeneration = (id?: string) => {
+  try {
+    if (!id) {
+      window.localStorage.removeItem(PENDING_GENERATION_KEY);
+      return;
+    }
+    const current = readPendingGenerationIds();
+    const next = current.filter((entry) => entry !== id);
+    if (next.length === 0) {
+      window.localStorage.removeItem(PENDING_GENERATION_KEY);
+      return;
+    }
+    window.localStorage.setItem(
+      PENDING_GENERATION_KEY,
+      JSON.stringify({ ids: next, at: Date.now() })
+    );
+  } catch {
+    // Ignore persistence errors.
+  }
+};
+
 export default function ColoringBookDemo() {
   const [stage, setStage] = useState<Stage>("upload");
   const [processed, setProcessed] = useState<ProcessedImage | null>(null);
@@ -385,6 +444,18 @@ export default function ColoringBookDemo() {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<GenerationStatus>("idle");
   const [generationError, setGenerationError] = useState<string | null>(null);
+  const [generationById, setGenerationById] = useState<
+    Record<string, GenerationStatus>
+  >({});
+  const [generationErrorsById, setGenerationErrorsById] = useState<
+    Record<string, string | null>
+  >({});
+  const [pendingNotice, setPendingNotice] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<UploadPanel | null>(null);
+  const [showProcessingOverlay, setShowProcessingOverlay] = useState(false);
+  const [showGenerationOverlay, setShowGenerationOverlay] = useState(false);
+  const [frameOpacity, setFrameOpacity] = useState(1);
+  const [displayRatio, setDisplayRatio] = useState(DEFAULT_RATIO);
   const [isDragging, setIsDragging] = useState(false);
   const [uploads, setUploads] = useState<UploadPanel[]>([]);
   const [presetOverrides, setPresetOverrides] = useState<Record<string, string>>(
@@ -401,17 +472,84 @@ export default function ColoringBookDemo() {
   const [canScrollPrev, setCanScrollPrev] = useState(false);
   const [canScrollNext, setCanScrollNext] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
   const selectionRef = useRef(0);
+  const selectedIdRef = useRef(selectedId);
   const hasRestoredRef = useRef(false);
   const uploadsRef = useRef<UploadPanel[]>([]);
+  const rehydrateInFlightRef = useRef<Set<string>>(new Set());
+  const processingTimerRef = useRef<number | null>(null);
+  const generationTimerRef = useRef<number | null>(null);
+  const frameFadeTimerRef = useRef<number | null>(null);
+  const lastFitRef = useRef<{
+    width: number;
+    height: number;
+    maxWidth: number;
+  } | null>(null);
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
     uploadsRef.current = uploads;
   }, [uploads]);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => {
+    const pending = readPendingGenerationIds();
+    if (!pending.length) return;
+    setPendingNotice(
+      "A previous generation was interrupted. Tap Generate to try again."
+    );
+    clearPendingGeneration();
+  }, []);
+
+  useEffect(() => {
+    if (processingTimerRef.current) {
+      window.clearTimeout(processingTimerRef.current);
+      processingTimerRef.current = null;
+    }
+
+    if (isProcessing) {
+      processingTimerRef.current = window.setTimeout(() => {
+        setShowProcessingOverlay(true);
+      }, 160);
+    } else {
+      setShowProcessingOverlay(false);
+    }
+
+    return () => {
+      if (processingTimerRef.current) {
+        window.clearTimeout(processingTimerRef.current);
+        processingTimerRef.current = null;
+      }
+    };
+  }, [isProcessing]);
+
+  useEffect(() => {
+    if (generationTimerRef.current) {
+      window.clearTimeout(generationTimerRef.current);
+      generationTimerRef.current = null;
+    }
+
+    if (status === "loading") {
+      generationTimerRef.current = window.setTimeout(() => {
+        setShowGenerationOverlay(true);
+      }, 200);
+    } else {
+      setShowGenerationOverlay(false);
+    }
+
+    return () => {
+      if (generationTimerRef.current) {
+        window.clearTimeout(generationTimerRef.current);
+        generationTimerRef.current = null;
+      }
+    };
+  }, [status]);
+
 
   useEffect(() => {
     const media = window.matchMedia("(min-width: 1024px)");
@@ -514,26 +652,77 @@ export default function ColoringBookDemo() {
     };
   }, []);
 
-  const ratioValue = processed?.ratioValue ?? DEFAULT_RATIO;
+  const ratioValue = displayRatio;
   const placeholder = useMemo(() => createPlaceholder(ratioValue), [ratioValue]);
-  const fitStyle = useMemo<CSSProperties>(() => {
+  const fitMetrics = useMemo(() => {
     if (!frameSize.width || !frameSize.height) {
-      return { width: "100%", height: "100%" };
+      return (
+        lastFitRef.current ?? { width: 0, height: 0, maxWidth: 0 }
+      );
     }
 
-    let fitWidth = frameSize.width;
-    let fitHeight = fitWidth / ratioValue;
+    const maxRatio = Math.max(MAX_RATIO, ratioValue);
+    const fitHeight = Math.min(frameSize.height, frameSize.width / maxRatio);
+    const fitWidth = fitHeight * ratioValue;
+    const maxWidth = fitHeight * MAX_RATIO;
 
-    if (fitHeight > frameSize.height) {
-      fitHeight = frameSize.height;
-      fitWidth = fitHeight * ratioValue;
-    }
-
-    return {
+    const next = {
       width: Math.round(fitWidth),
       height: Math.round(fitHeight),
+      maxWidth: Math.round(maxWidth),
     };
+    lastFitRef.current = next;
+    return next;
   }, [frameSize, ratioValue]);
+
+  const frameOuterStyle = useMemo<CSSProperties>(
+    () => ({
+      width: fitMetrics.maxWidth,
+      height: fitMetrics.height,
+      transition: "width 260ms ease, height 260ms ease",
+      willChange: "width, height",
+    }),
+    [fitMetrics.height, fitMetrics.maxWidth]
+  );
+
+  const frameMotionStyle = useMemo<CSSProperties>(
+    () => ({
+      width: fitMetrics.width,
+      height: fitMetrics.height,
+      position: "absolute",
+      left: "50%",
+      top: "50%",
+      transform: "translate(-50%, -50%)",
+      opacity: fitMetrics.height ? frameOpacity : 0,
+      transition: "width 260ms ease, opacity 180ms ease",
+      willChange: "width, opacity",
+    }),
+    [fitMetrics.width, fitMetrics.height, frameOpacity]
+  );
+
+  useEffect(() => {
+    if (frameFadeTimerRef.current) {
+      window.clearTimeout(frameFadeTimerRef.current);
+      frameFadeTimerRef.current = null;
+    }
+
+    if (stage === "upload") {
+      setFrameOpacity(1);
+      return;
+    }
+
+    setFrameOpacity(0.92);
+    frameFadeTimerRef.current = window.setTimeout(() => {
+      setFrameOpacity(1);
+    }, 100);
+
+    return () => {
+      if (frameFadeTimerRef.current) {
+        window.clearTimeout(frameFadeTimerRef.current);
+        frameFadeTimerRef.current = null;
+      }
+    };
+  }, [ratioValue, selectedId, stage]);
 
   const persistSelectedId = useCallback((id: string) => {
     try {
@@ -596,6 +785,105 @@ export default function ColoringBookDemo() {
     },
     [persistUploads]
   );
+
+  const updateGenerationState = useCallback(
+    (id: string, nextStatus: GenerationStatus, error: string | null = null) => {
+      setGenerationById((prev) => ({ ...prev, [id]: nextStatus }));
+      setGenerationErrorsById((prev) => ({ ...prev, [id]: error }));
+      if (selectedIdRef.current === id) {
+        setStatus(nextStatus);
+        setGenerationError(error);
+      }
+    },
+    []
+  );
+
+  const rehydrateUploadFromStore = useCallback(
+    async (id: string) => {
+      if (rehydrateInFlightRef.current.has(id)) return;
+      rehydrateInFlightRef.current.add(id);
+
+      try {
+        const target = uploadsRef.current.find((entry) => entry.id === id);
+        if (!target) return;
+
+        const record = await getImageRecord(id);
+        if (!record?.original) {
+          updateUploads((prev) => prev.filter((entry) => entry.id !== id));
+          if (selectedIdRef.current === id) {
+            selectedIdRef.current = CUSTOM_ID;
+            setSelectedId(CUSTOM_ID);
+            persistSelectedId(CUSTOM_ID);
+            setDisplayRatio(DEFAULT_RATIO);
+            setStage("upload");
+            setProcessed(null);
+            setGeneratedSrc(null);
+            setBlobUrl(null);
+            updateGenerationState(CUSTOM_ID, "idle", null);
+          }
+          return;
+        }
+
+        const originalUrl = URL.createObjectURL(record.original);
+        const generatedUrl = record.generated
+          ? URL.createObjectURL(record.generated)
+          : undefined;
+
+        updateUploads((prev) =>
+          prev.map((entry) =>
+            entry.id === id
+              ? {
+                  ...entry,
+                  originalUrl,
+                  generatedUrl,
+                  hasGenerated: Boolean(record.generated),
+                }
+              : entry
+          )
+        );
+
+      if (selectedIdRef.current === id) {
+        setProcessed({
+          id,
+          blob: record.original,
+          previewUrl: originalUrl,
+          width: 0,
+          height: 0,
+          ratioLabel: target.ratioLabel,
+          ratioValue: target.ratioValue,
+          name: target.name,
+        });
+        setDisplayRatio(target.ratioValue);
+        setGeneratedSrc(generatedUrl ?? null);
+          const nextStatus =
+            generationById[id] ??
+            (generatedUrl ? "ready" : "idle");
+          updateGenerationState(
+            id,
+            nextStatus,
+            generationErrorsById[id] ?? null
+          );
+          setStage(nextStatus === "idle" ? "preview" : "result");
+        }
+      } finally {
+        rehydrateInFlightRef.current.delete(id);
+      }
+    },
+    [
+      generationById,
+      generationErrorsById,
+      persistSelectedId,
+      updateGenerationState,
+      updateUploads,
+    ]
+  );
+
+  const handleSelectedImageError = useCallback(() => {
+    const id = processed?.id;
+    if (!id) return;
+    if (!uploadsRef.current.some((entry) => entry.id === id)) return;
+    void rehydrateUploadFromStore(id);
+  }, [processed?.id, rehydrateUploadFromStore]);
 
   const updateScrollState = useCallback(() => {
     const strip = stripRef.current;
@@ -697,8 +985,9 @@ export default function ColoringBookDemo() {
   const selectPreset = useCallback(
     (sample: SampleSet) => {
       selectionRef.current += 1;
-      abortRef.current?.abort();
+      selectedIdRef.current = sample.id;
       setSelectedId(sample.id);
+      setDisplayRatio(sample.ratioValue);
       persistSelectedId(sample.id);
       setStage("result");
       setProcessed({
@@ -713,13 +1002,24 @@ export default function ColoringBookDemo() {
       });
       setGeneratedSrc(presetOverrides[sample.id] ?? sample.generatedSrc);
       setBlobUrl(null);
-      setStatus("ready");
-      setGenerationError(null);
+      const nextStatus = generationById[sample.id] ?? "ready";
+      updateGenerationState(
+        sample.id,
+        nextStatus,
+        generationErrorsById[sample.id] ?? null
+      );
       setUploadError(null);
       setIsDragging(false);
       preloadSampleBlob(sample);
     },
-    [persistSelectedId, preloadSampleBlob, presetOverrides]
+    [
+      generationById,
+      generationErrorsById,
+      persistSelectedId,
+      preloadSampleBlob,
+      presetOverrides,
+      updateGenerationState,
+    ]
   );
 
   const selectUpload = useCallback(
@@ -729,11 +1029,10 @@ export default function ColoringBookDemo() {
 
       selectionRef.current += 1;
       const token = selectionRef.current;
-      abortRef.current?.abort();
+      selectedIdRef.current = id;
       setSelectedId(id);
       persistSelectedId(id);
       setUploadError(null);
-      setGenerationError(null);
       setIsDragging(false);
       setBlobUrl(null);
       setIsProcessing(true);
@@ -743,8 +1042,13 @@ export default function ColoringBookDemo() {
         if (selectionRef.current !== token) return;
         if (!record?.original) {
           updateUploads((prev) => prev.filter((entry) => entry.id !== id));
+          selectedIdRef.current = CUSTOM_ID;
           setSelectedId(CUSTOM_ID);
+          setDisplayRatio(DEFAULT_RATIO);
           setStage("upload");
+          setProcessed(null);
+          setGeneratedSrc(null);
+          setBlobUrl(null);
           return;
         }
 
@@ -758,6 +1062,7 @@ export default function ColoringBookDemo() {
           generatedUrl = URL.createObjectURL(record.generated);
         }
 
+        setDisplayRatio(target.ratioValue);
         if (
           originalUrl !== target.originalUrl ||
           generatedUrl !== target.generatedUrl ||
@@ -788,8 +1093,14 @@ export default function ColoringBookDemo() {
           name: target.name,
         });
         setGeneratedSrc(generatedUrl ?? null);
-        setStatus(generatedUrl ? "ready" : "idle");
-        setStage(generatedUrl ? "result" : "preview");
+        const nextStatus =
+          generationById[id] ?? (generatedUrl ? "ready" : "idle");
+        updateGenerationState(
+          id,
+          nextStatus,
+          generationErrorsById[id] ?? null
+        );
+        setStage(nextStatus === "idle" ? "preview" : "result");
       } catch {
         setUploadError("We couldn't load that photo.");
       } finally {
@@ -798,8 +1109,74 @@ export default function ColoringBookDemo() {
         }
       }
     },
-    [persistSelectedId, updateUploads, uploads]
+    [
+      generationById,
+      generationErrorsById,
+      persistSelectedId,
+      updateGenerationState,
+      updateUploads,
+      uploads,
+    ]
   );
+
+  const openDeleteModal = useCallback((upload: UploadPanel) => {
+    setDeleteTarget(upload);
+  }, []);
+
+  const closeDeleteModal = useCallback(() => {
+    setDeleteTarget(null);
+  }, []);
+
+  const confirmDelete = useCallback(async () => {
+    if (!deleteTarget) return;
+    const deleteId = deleteTarget.id;
+    setDeleteTarget(null);
+    clearPendingGeneration(deleteId);
+
+    setGenerationById((prev) => {
+      const next = { ...prev };
+      delete next[deleteId];
+      return next;
+    });
+    setGenerationErrorsById((prev) => {
+      const next = { ...prev };
+      delete next[deleteId];
+      return next;
+    });
+
+    try {
+      await deleteImageRecord(deleteId);
+    } catch {
+      // Ignore deletion failures.
+    }
+
+    const remainingUploads = uploadsRef.current.filter(
+      (entry) => entry.id !== deleteId
+    );
+    updateUploads((prev) => prev.filter((entry) => entry.id !== deleteId));
+
+    if (selectedIdRef.current === deleteId) {
+      if (remainingUploads.length > 0) {
+        void selectUpload(remainingUploads[0].id);
+      } else {
+        selectedIdRef.current = CUSTOM_ID;
+        setSelectedId(CUSTOM_ID);
+        persistSelectedId(CUSTOM_ID);
+        setDisplayRatio(DEFAULT_RATIO);
+        setStage("upload");
+        setProcessed(null);
+        setGeneratedSrc(null);
+        setBlobUrl(null);
+        updateGenerationState(CUSTOM_ID, "idle", null);
+      }
+    }
+  }, [
+    deleteTarget,
+    persistSelectedId,
+    selectUpload,
+    updateGenerationState,
+    updateUploads,
+  ]);
 
   useEffect(() => {
     if (!isHydrated || hasRestoredRef.current) return;
@@ -826,7 +1203,9 @@ export default function ColoringBookDemo() {
     }
 
     hasRestoredRef.current = true;
+    selectedIdRef.current = CUSTOM_ID;
     setSelectedId(CUSTOM_ID);
+    setDisplayRatio(DEFAULT_RATIO);
     setStage("upload");
   }, [isHydrated, selectPreset, selectUpload, uploads]);
 
@@ -842,7 +1221,6 @@ export default function ColoringBookDemo() {
         return;
       }
 
-      abortRef.current?.abort();
       setIsProcessing(true);
       setUploadError(null);
       setIsDragging(false);
@@ -869,13 +1247,14 @@ export default function ColoringBookDemo() {
         };
 
         updateUploads((prev) => [newUpload, ...prev]);
+        selectedIdRef.current = uploadId;
         setSelectedId(uploadId);
         persistSelectedId(uploadId);
+        setDisplayRatio(prepared.ratioValue);
         setProcessed(prepared);
         setGeneratedSrc(null);
         setBlobUrl(null);
-        setStatus("idle");
-        setGenerationError(null);
+        updateGenerationState(uploadId, "idle", null);
         setStage("preview");
       } catch (error) {
         setUploadError(
@@ -886,7 +1265,7 @@ export default function ColoringBookDemo() {
         setIsProcessing(false);
       }
     },
-    [persistSelectedId, updateUploads]
+    [persistSelectedId, updateGenerationState, updateUploads]
   );
 
   const handleInputChange = useCallback(
@@ -915,10 +1294,7 @@ export default function ColoringBookDemo() {
   const generate = useCallback(async () => {
     if (!processed) return;
 
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
+    const activeId = processed.id;
     const modelSelection = normalizeModelSelection(settings.imageModel);
     const provider = inferProviderFromModel(modelSelection);
     const apiKey =
@@ -933,16 +1309,44 @@ export default function ColoringBookDemo() {
       return;
     }
 
+    if (!hasUserKey && !freeUsed) {
+      writeFreeGenerationUsed();
+    }
+
+    writePendingGeneration(activeId);
+    setPendingNotice(null);
+
+    const fallbackStage: Stage = generatedSrc ? "result" : "preview";
+    const fallbackStatus: GenerationStatus = generatedSrc ? "ready" : "idle";
+
     setStage("result");
-    setStatus("loading");
-    setGenerationError(null);
+    updateGenerationState(activeId, "loading", null);
     setBlobUrl(null);
 
-    const activeId = processed.id;
     const isUpload = uploads.some((entry) => entry.id === activeId);
 
     try {
       const sourceBlob = await ensureSourceBlob(processed);
+      if (isUpload) {
+        const activeUpload = uploadsRef.current.find(
+          (entry) => entry.id === activeId
+        );
+        if (!activeUpload?.originalUrl) {
+          const originalUrl = URL.createObjectURL(sourceBlob);
+          updateUploads((prev) =>
+            prev.map((entry) =>
+              entry.id === activeId ? { ...entry, originalUrl } : entry
+            )
+          );
+          if (selectedIdRef.current === activeId) {
+            setProcessed((prev) =>
+              prev
+                ? { ...prev, blob: sourceBlob, previewUrl: originalUrl }
+                : prev
+            );
+          }
+        }
+      }
       const formData = new FormData();
       formData.append("image", sourceBlob, processed.name);
       formData.append("aspectRatio", processed.ratioLabel);
@@ -954,12 +1358,23 @@ export default function ColoringBookDemo() {
       const response = await fetch("/api/coloring", {
         method: "POST",
         body: formData,
-        signal: controller.signal,
       });
 
       const data = await response.json();
 
       if (!response.ok) {
+        if (response.status === 429 || data?.code === "KEY_REQUIRED") {
+          setSettingsNotice(
+            data?.error ||
+              `Add your ${provider === "google" ? "Google" : "OpenAI"} API key to continue.`
+          );
+          setIsSettingsOpen(true);
+          updateGenerationState(activeId, fallbackStatus, null);
+          if (selectedIdRef.current === activeId) {
+            setStage(fallbackStage);
+          }
+          return;
+        }
         throw new Error(data?.error || "Generation failed.");
       }
 
@@ -968,17 +1383,18 @@ export default function ColoringBookDemo() {
         throw new Error("No image returned from model.");
       }
 
+      const isActive = selectedIdRef.current === activeId;
+
       if (isUpload) {
         const { blob: generatedBlob } = dataUrlToBlob(imageData);
         const generatedUrl = URL.createObjectURL(generatedBlob);
-        if (selectedId !== activeId) {
-          URL.revokeObjectURL(generatedUrl);
-          return;
+
+        if (isActive) {
+          setGeneratedSrc(generatedUrl);
+          setBlobUrl(typeof data?.blobUrl === "string" ? data.blobUrl : null);
         }
 
-        setGeneratedSrc(generatedUrl);
-        setBlobUrl(typeof data?.blobUrl === "string" ? data.blobUrl : null);
-        setStatus("ready");
+        updateGenerationState(activeId, "ready", null);
 
         try {
           await saveImageRecord({
@@ -1003,29 +1419,30 @@ export default function ColoringBookDemo() {
           )
         );
       } else {
-        setGeneratedSrc(imageData);
-        setStatus("ready");
+        if (isActive) {
+          setGeneratedSrc(imageData);
+        }
+        updateGenerationState(activeId, "ready", null);
         setPresetOverrides((prev) => ({ ...prev, [activeId]: imageData }));
       }
-
-      if (!hasUserKey && !freeUsed) {
-        writeFreeGenerationUsed();
-      }
     } catch (error) {
-      if ((error as Error).name === "AbortError") {
-        return;
-      }
-
-      setStatus("error");
-      setGenerationError(
+      updateGenerationState(
+        activeId,
+        "error",
         error instanceof Error ? error.message : "Generation failed."
       );
     } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
-      }
+      clearPendingGeneration(activeId);
     }
-  }, [ensureSourceBlob, processed, selectedId, settings, updateUploads, uploads]);
+  }, [
+    ensureSourceBlob,
+    generatedSrc,
+    processed,
+    settings,
+    updateGenerationState,
+    updateUploads,
+    uploads,
+  ]);
 
   const handleDownload = useCallback(async () => {
     if (!generatedSrc && !blobUrl) return;
@@ -1080,7 +1497,7 @@ export default function ColoringBookDemo() {
   );
 
   const overlay =
-    status === "loading" ? (
+    status === "loading" && showGenerationOverlay ? (
       <div className="absolute inset-0 z-30 flex items-center justify-center bg-white/70 backdrop-blur-sm">
         <div className="flex items-center gap-3 rounded-full bg-white/90 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-neutral-700 shadow-lg">
           <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
@@ -1100,7 +1517,7 @@ export default function ColoringBookDemo() {
       </div>
     ) : null;
 
-  const processingOverlay = isProcessing ? (
+  const processingOverlay = showProcessingOverlay ? (
     <div className="absolute inset-0 z-20 flex items-center justify-center rounded-3xl bg-white/80 backdrop-blur">
       <div className="flex items-center gap-3 rounded-full bg-white/90 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-neutral-700 shadow-lg">
         <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
@@ -1113,14 +1530,13 @@ export default function ColoringBookDemo() {
     <section className="relative">
       <header className="text-center">
         <p className="text-xs uppercase tracking-[0.35em] text-neutral-500">
-          img2coloringbook
+          Etch
         </p>
         <h1 className="mt-4 font-display text-4xl leading-tight text-neutral-900 sm:text-5xl md:text-6xl">
           Turn photos into pencil-ready pages.
         </h1>
         <p className="mx-auto mt-4 max-w-2xl text-sm text-neutral-600 sm:text-base">
-          Drop a photo, we crop it to a classic ratio, and the AI turns it into
-          crisp line art. Drag to compare once it renders.
+          Drop a photo and get clean line art fast, then drag to compare.
         </p>
         <div className="mt-5 flex justify-center">
           <button
@@ -1193,20 +1609,24 @@ export default function ColoringBookDemo() {
                 type="button"
                 onClick={openPicker}
                 aria-label="Upload your own photo"
-                className={`group relative aspect-[3/2] w-20 flex-shrink-0 overflow-hidden rounded-2xl border-2 border-dashed bg-white/80 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md sm:w-24 lg:w-full ${
+                className={`group relative aspect-[3/2] w-20 flex-shrink-0 overflow-hidden rounded-2xl border-2 border-dashed shadow-sm transition hover:-translate-y-0.5 hover:shadow-md sm:w-24 lg:w-full ${
                   selectedId === CUSTOM_ID
-                    ? "border-amber-400/80 ring-2 ring-amber-400/80"
-                    : "border-neutral-200/80 ring-1 ring-black/5"
+                    ? "border-amber-300/80 bg-amber-50/70 shadow-[0_12px_28px_rgba(15,23,42,0.12)]"
+                    : "border-neutral-200/80 bg-white/80"
                 }`}
               >
                 <div className="flex h-full w-full items-center justify-center text-sm font-semibold text-neutral-600">
                   +
                 </div>
+                {selectedId === CUSTOM_ID ? (
+                  <span className="pointer-events-none absolute inset-0 rounded-2xl border border-amber-400/70" />
+                ) : null}
               </button>
 
               {uploads.map((upload) => {
                 const isActive = selectedId === upload.id;
                 const hasGenerated = Boolean(upload.generatedUrl);
+                const isGenerating = generationById[upload.id] === "loading";
                 return (
                   <button
                     key={upload.id}
@@ -1214,7 +1634,9 @@ export default function ColoringBookDemo() {
                     onClick={() => selectUpload(upload.id)}
                     aria-label={`Use upload ${upload.name}`}
                     className={`group relative aspect-[3/2] w-20 flex-shrink-0 overflow-hidden rounded-2xl border border-white/70 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md sm:w-24 lg:w-full ${
-                      isActive ? "ring-2 ring-amber-400/80" : "ring-1 ring-black/5"
+                      isActive
+                        ? "shadow-[0_14px_32px_rgba(15,23,42,0.18)]"
+                        : "shadow-sm"
                     }`}
                   >
                     {upload.originalUrl ? (
@@ -1222,6 +1644,7 @@ export default function ColoringBookDemo() {
                         src={upload.originalUrl}
                         alt=""
                         className="absolute inset-0 h-full w-full object-cover"
+                        onError={() => void rehydrateUploadFromStore(upload.id)}
                         loading="lazy"
                         decoding="async"
                       />
@@ -1234,9 +1657,53 @@ export default function ColoringBookDemo() {
                         alt=""
                         className="absolute inset-0 h-full w-full object-cover"
                         style={{ clipPath: "inset(0 0 0 50%)" }}
+                        onError={() => void rehydrateUploadFromStore(upload.id)}
                         loading="lazy"
                         decoding="async"
                       />
+                    ) : null}
+                    {isGenerating ? (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-white/75 backdrop-blur-sm">
+                        <span className="h-6 w-6 animate-spin rounded-full border-2 border-amber-400/80 border-t-transparent" />
+                      </div>
+                    ) : null}
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openDeleteModal(upload);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          openDeleteModal(upload);
+                        }
+                      }}
+                      aria-label={`Delete ${upload.name}`}
+                      className={`absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full border border-white/80 bg-white/90 text-neutral-600 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${
+                        isActive
+                          ? "opacity-100"
+                          : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                      }`}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        className="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M3 6h18" />
+                        <path d="M8 6V4h8v2" />
+                        <path d="M6 6l1 14h10l1-14" />
+                      </svg>
+                    </span>
+                    {isActive ? (
+                      <span className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-amber-400/80" />
                     ) : null}
                   </button>
                 );
@@ -1246,6 +1713,7 @@ export default function ColoringBookDemo() {
                 const isActive = selectedId === sample.id;
                 const generatedSrc =
                   presetOverrides[sample.id] ?? sample.generatedSrc;
+                const isGenerating = generationById[sample.id] === "loading";
                 return (
                   <button
                     key={sample.id}
@@ -1253,7 +1721,9 @@ export default function ColoringBookDemo() {
                     onClick={() => selectPreset(sample)}
                     aria-label={`Use sample ${sample.name}`}
                     className={`group relative aspect-[3/2] w-20 flex-shrink-0 overflow-hidden rounded-2xl border border-white/70 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md sm:w-24 lg:w-full ${
-                      isActive ? "ring-2 ring-amber-400/80" : "ring-1 ring-black/5"
+                      isActive
+                        ? "shadow-[0_14px_32px_rgba(15,23,42,0.18)]"
+                        : "shadow-sm"
                     }`}
                   >
                     <img
@@ -1271,6 +1741,14 @@ export default function ColoringBookDemo() {
                       loading="lazy"
                       decoding="async"
                     />
+                    {isGenerating ? (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-white/75 backdrop-blur-sm">
+                        <span className="h-6 w-6 animate-spin rounded-full border-2 border-amber-400/80 border-t-transparent" />
+                      </div>
+                    ) : null}
+                    {isActive ? (
+                      <span className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-amber-400/80" />
+                    ) : null}
                   </button>
                 );
               })}
@@ -1283,82 +1761,98 @@ export default function ColoringBookDemo() {
             ref={frameRef}
             className="relative flex h-[clamp(300px,56vh,720px)] items-center justify-center"
           >
-            {stage === "upload" ? (
-              <div
-                className={`relative flex h-full w-full flex-col items-center justify-center gap-4 rounded-3xl border-2 border-dashed px-6 py-10 text-center transition ${
-                  isDragging
-                    ? "border-amber-300/80 bg-amber-50/70"
-                    : "border-neutral-200/80 bg-white/80"
-                }`}
-                style={fitStyle}
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  setIsDragging(true);
-                }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={handleDrop}
-                onClick={openPicker}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
+            <div
+              className="relative"
+              style={frameOuterStyle}
+            >
+              {stage === "upload" ? (
+                <div
+                  className={`relative flex h-full w-full flex-col items-center justify-center gap-4 rounded-3xl border-2 border-dashed px-6 py-10 text-center transition ${
+                    isDragging
+                      ? "border-amber-300/80 bg-amber-50/70"
+                      : "border-neutral-200/80 bg-white/80"
+                  }`}
+                  style={frameMotionStyle}
+                  onDragOver={(event) => {
                     event.preventDefault();
-                    openPicker();
-                  }
-                }}
-                role="button"
-                tabIndex={0}
-              >
-                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white shadow">
-                  <span className="text-xl font-semibold text-neutral-700">
-                    +
-                  </span>
-                </div>
-                <div className="text-base font-semibold text-neutral-800">
-                  Drag & drop your photo
-                </div>
-                <div className="text-xs uppercase tracking-[0.3em] text-neutral-500">
-                  JPG, PNG, or WebP
-                </div>
-                {uploadError ? (
-                  <div className="text-xs text-rose-500">{uploadError}</div>
-                ) : (
-                  <div className="text-xs text-neutral-500">
-                    Click anywhere to browse.
+                    setIsDragging(true);
+                  }}
+                  onDragLeave={() => setIsDragging(false)}
+                  onDrop={handleDrop}
+                  onClick={openPicker}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      openPicker();
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white shadow">
+                    <span className="text-xl font-semibold text-neutral-700">
+                      +
+                    </span>
                   </div>
-                )}
-              </div>
-            ) : stage === "preview" ? (
-              <div
-                className="relative overflow-hidden rounded-3xl bg-neutral-900/5 shadow-lg"
-                style={fitStyle}
-              >
-                <img
-                  src={processed?.previewUrl ?? placeholder}
-                  alt="Prepared upload"
-                  className="absolute inset-0 h-full w-full object-cover"
-                />
-                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-neutral-900/40 to-transparent px-6 py-5">
-                  <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold uppercase tracking-[0.3em] text-white">
-                    <span className="h-2 w-2 rounded-full bg-amber-300" />
-                    Cropped to {processed?.ratioLabel}
+                  <div className="text-base font-semibold text-neutral-800">
+                    Drag & drop your photo
+                  </div>
+                  <div className="text-xs uppercase tracking-[0.3em] text-neutral-500">
+                    JPG, PNG, or WebP
+                  </div>
+                  {uploadError ? (
+                    <div className="text-xs text-rose-500">{uploadError}</div>
+                  ) : (
+                    <div className="text-xs text-neutral-500">
+                      Click anywhere to browse.
+                    </div>
+                  )}
+                </div>
+              ) : stage === "preview" ? (
+                <div
+                  className="relative overflow-hidden rounded-3xl bg-neutral-900/5 shadow-lg"
+                  style={frameMotionStyle}
+                >
+                  <img
+                    src={processed?.previewUrl ?? placeholder}
+                    alt="Prepared upload"
+                    className="absolute inset-0 h-full w-full object-cover"
+                  />
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-neutral-900/40 to-transparent px-6 py-5">
+                    <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold uppercase tracking-[0.3em] text-white">
+                      <span className="h-2 w-2 rounded-full bg-amber-300" />
+                      Cropped to {processed?.ratioLabel}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ) : (
-              <div style={fitStyle} className="flex items-center justify-center">
-                <GSAPImageCompareSliderDemo
-                  className="relative"
-                  beforeSrc={processed?.previewUrl ?? placeholder}
-                  afterSrc={generatedSrc ?? placeholder}
-                  aspectRatio={ratioValue}
-                  overlay={overlay}
-                />
-              </div>
-            )}
+              ) : (
+                <div style={frameMotionStyle}>
+                  <GSAPImageCompareSliderDemo
+                    className="relative"
+                    beforeSrc={processed?.previewUrl ?? placeholder}
+                    afterSrc={generatedSrc ?? placeholder}
+                    aspectRatio={ratioValue}
+                    fill
+                    overlay={overlay}
+                    onBeforeError={handleSelectedImageError}
+                    onAfterError={handleSelectedImageError}
+                  />
+                </div>
+              )}
+            </div>
             {processingOverlay}
           </div>
         </div>
         <div className="hidden lg:block" />
       </div>
+
+      {pendingNotice ? (
+        <div className="mt-5 flex justify-center">
+          <div className="rounded-full border border-amber-200/80 bg-amber-50/70 px-4 py-2 text-xs text-amber-900 shadow-sm">
+            {pendingNotice}
+          </div>
+        </div>
+      ) : null}
 
       <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
         {stage === "upload" ? (
@@ -1530,6 +2024,53 @@ export default function ColoringBookDemo() {
                 className="rounded-full bg-neutral-900 px-5 py-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-white shadow-lg"
               >
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteTarget ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4 py-6 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          onClick={closeDeleteModal}
+        >
+          <div
+            className="w-full max-w-md rounded-3xl bg-white px-6 py-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-neutral-900">
+                Delete photo?
+              </h2>
+              <button
+                type="button"
+                onClick={closeDeleteModal}
+                className="rounded-full border border-neutral-200 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.3em] text-neutral-600"
+              >
+                Close
+              </button>
+            </div>
+            <div className="mt-4 text-sm text-neutral-600">
+              This removes <span className="font-semibold">{deleteTarget.name}</span>{" "}
+              from your browser. You can always upload it again later.
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeDeleteModal}
+                className="rounded-full border border-neutral-200 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-neutral-600"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDelete}
+                className="rounded-full bg-neutral-900 px-5 py-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-white shadow-lg"
+              >
+                Delete
               </button>
             </div>
           </div>

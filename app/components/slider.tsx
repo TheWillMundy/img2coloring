@@ -22,6 +22,9 @@ type SliderProps = {
   tip?: string;
   className?: string;
   overlay?: ReactNode;
+  onBeforeError?: () => void;
+  onAfterError?: () => void;
+  fill?: boolean;
 };
 
 export default function GSAPImageCompareSliderDemo({
@@ -34,6 +37,9 @@ export default function GSAPImageCompareSliderDemo({
   tip,
   className,
   overlay,
+  onBeforeError,
+  onAfterError,
+  fill = false,
 }: SliderProps) {
   const images = useMemo(
     () => ({
@@ -49,7 +55,7 @@ export default function GSAPImageCompareSliderDemo({
   const rangeRef = useRef<HTMLInputElement | null>(null);
 
   const proxyRef = useRef({ p: 0.5 }); // 0..1
-  const sizeRef = useRef({ w: 0, handleW: 44 });
+  const sizeRef = useRef({ w: 0, handleW: 36 });
 
   const clickTweenRef = useRef<gsap.core.Tween | null>(null);
   const inertiaTweenRef = useRef<gsap.core.Tween | null>(null);
@@ -129,7 +135,7 @@ export default function GSAPImageCompareSliderDemo({
       const rect = container.getBoundingClientRect();
       const hRect = handle.getBoundingClientRect();
       sizeRef.current.w = rect.width;
-      sizeRef.current.handleW = hRect.width || 44;
+      sizeRef.current.handleW = hRect.width || 36;
       render(proxyRef.current.p);
     };
 
@@ -315,10 +321,30 @@ export default function GSAPImageCompareSliderDemo({
   }, []);
 
   const rootClassName = className ? `w-full ${className}` : "w-full";
+  const rootClasses = fill ? `${rootClassName} h-full` : rootClassName;
   const hasHeader = Boolean(title || subtitle || credit);
+  const containerClassName = fill
+    ? "relative h-full w-full overflow-hidden rounded-3xl shadow-lg bg-neutral-100 select-none"
+    : "relative w-full overflow-hidden rounded-3xl shadow-lg bg-neutral-100 select-none";
+  const containerStyle = fill
+    ? {
+        height: "100%",
+        width: "100%",
+        touchAction: "none",
+        cursor: "ew-resize",
+        userSelect: "none",
+        WebkitUserSelect: "none",
+      }
+    : {
+        aspectRatio,
+        touchAction: "none",
+        cursor: "ew-resize",
+        userSelect: "none",
+        WebkitUserSelect: "none",
+      };
 
   return (
-    <div className={rootClassName}>
+    <div className={rootClasses}>
       {hasHeader ? (
         <div className="mb-3 flex items-end justify-between gap-4">
           <div>
@@ -331,14 +357,8 @@ export default function GSAPImageCompareSliderDemo({
 
       <div
         ref={containerRef}
-        className="relative w-full overflow-hidden rounded-3xl shadow-lg bg-neutral-100 select-none"
-        style={{
-          aspectRatio,
-          touchAction: "none",
-          cursor: "ew-resize",
-          userSelect: "none",
-          WebkitUserSelect: "none",
-        }}
+        className={containerClassName}
+        style={containerStyle}
         aria-label="Image comparison slider"
       >
         <img
@@ -349,6 +369,7 @@ export default function GSAPImageCompareSliderDemo({
           draggable={false}
           decoding="async"
           loading="eager"
+          onError={onAfterError}
         />
 
         <img
@@ -364,20 +385,31 @@ export default function GSAPImageCompareSliderDemo({
           draggable={false}
           decoding="async"
           loading="eager"
+          onError={onBeforeError}
         />
 
         <div
           ref={handleRef}
           className="absolute top-0 bottom-0 z-10 pointer-events-none"
-          style={{ width: 44, willChange: "transform" }}
+          style={{ width: 36, willChange: "transform" }}
           aria-hidden
         >
           <div className="absolute left-1/2 top-0 bottom-0 w-[2px] -translate-x-1/2 bg-white/80 shadow" />
           <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-            <div className="flex items-center gap-2 rounded-full bg-white/90 backdrop-blur px-3 py-2 shadow-lg">
-              <div className="h-2 w-2 rounded-full bg-neutral-900/70" />
-              <div className="text-[11px] font-medium tracking-wide text-neutral-700">DRAG</div>
-              <div className="h-2 w-2 rounded-full bg-neutral-900/70" />
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-white/90 backdrop-blur shadow-lg">
+              <svg
+                viewBox="0 0 24 24"
+                className="h-4 w-4 text-neutral-700"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M8 12h8" />
+                <path d="M10 9l-3 3 3 3" />
+                <path d="M14 9l3 3-3 3" />
+              </svg>
             </div>
           </div>
         </div>

@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { generateImage, generateText } from "ai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -10,6 +10,8 @@ const PROMPT =
   "Turn this photo into a clean, high-contrast coloring book illustration. Keep the main shapes and contours, remove shading and textures, use bold black outlines, and leave a white background. Maintain the EXACT aspect ratio of the original photo, high-resolution.";
 const DEFAULT_IMAGE_MODEL = "gpt-image-1.5";
 const DEFAULT_FULL_MODEL = `openai/${DEFAULT_IMAGE_MODEL}`;
+const FREE_GENERATION_COOKIE = "etch_free_generation";
+const FREE_GENERATION_MAX_AGE = 60 * 60 * 24 * 30;
 
 const OPENAI_SIZE_BY_RATIO: Record<string, string> = {
   "1:1": "1024x1024",
@@ -75,7 +77,7 @@ const normalizeModelSelection = (modelId: string) => {
   return DEFAULT_FULL_MODEL;
 };
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   const providerEnv = process.env.IMAGE_PROVIDER?.trim().toLowerCase();
   const envModel = process.env.IMAGE_MODEL ?? DEFAULT_IMAGE_MODEL;
   let imageFile: File | null = null;
@@ -143,11 +145,24 @@ export async function POST(req: Request) {
     );
   }
 
+  const hasUserKey = Boolean(requestApiKey && requestApiKey.trim().length > 0);
+  const freeUsed = req.cookies.get(FREE_GENERATION_COOKIE)?.value === "true";
+  if (!hasUserKey && freeUsed) {
+    return NextResponse.json(
+      {
+        error: "Add your API key to continue generating images.",
+        code: "KEY_REQUIRED",
+      },
+      { status: 429 }
+    );
+  }
+
   const arrayBuffer = await imageFile.arrayBuffer();
   const sourceImage = Buffer.from(arrayBuffer);
   const rawModel = normalizeModelSelection(requestModel || envModel);
   const provider = inferProvider(requestProvider ?? providerEnv, rawModel);
   const modelId = stripProviderPrefix(rawModel);
+  const shouldSetFreeCookie = !hasUserKey && !freeUsed;
 
   const saveToBlob = async (
     base64: string,
@@ -175,35 +190,58 @@ export async function POST(req: Request) {
     return blob.url;
   };
 
+  const applyFreeCookie = (response: NextResponse) => {
+    if (!shouldSetFreeCookie) return response;
+    response.cookies.set({
+      name: FREE_GENERATION_COOKIE,
+      value: "true",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      maxAge: FREE_GENERATION_MAX_AGE,
+      path: "/",
+    });
+    return response;
+  };
+
   if (
     requestProvider &&
     requestProvider !== "openai" &&
     requestProvider !== "google"
   ) {
-    return NextResponse.json(
-      { error: "Invalid imageProvider. Use 'openai' or 'google'." },
-      { status: 400 }
+    return applyFreeCookie(
+      NextResponse.json(
+        { error: "Invalid imageProvider. Use 'openai' or 'google'." },
+        { status: 400 }
+      )
     );
   }
+
+  const respondWithImage = (payload: { image: string; blobUrl: string | null }) =>
+    applyFreeCookie(NextResponse.json(payload));
 
   try {
     if (provider === "google") {
       const googleKey =
         requestApiKey || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
       if (!googleKey) {
-        return NextResponse.json(
-          { error: "Missing GOOGLE_GENERATIVE_AI_API_KEY." },
-          { status: 500 }
+        return applyFreeCookie(
+          NextResponse.json(
+            { error: "Missing GOOGLE_GENERATIVE_AI_API_KEY." },
+            { status: 500 }
+          )
         );
       }
 
       const normalizedModel = modelId.toLowerCase();
       if (!normalizedModel.startsWith("gemini-")) {
-        return NextResponse.json(
-          {
-            error: "IMAGE_MODEL must be a Gemini image model (gemini-*).",
-          },
-          { status: 400 }
+        return applyFreeCookie(
+          NextResponse.json(
+            {
+              error: "IMAGE_MODEL must be a Gemini image model (gemini-*).",
+            },
+            { status: 400 }
+          )
         );
       }
 
@@ -235,15 +273,17 @@ export async function POST(req: Request) {
           : undefined);
 
       if (!base64) {
-        return NextResponse.json(
-          { error: "No image returned from model." },
-          { status: 502 }
+        return applyFreeCookie(
+          NextResponse.json(
+            { error: "No image returned from model." },
+            { status: 502 }
+          )
         );
       }
 
       const blobUrl = await saveToBlob(base64, mediaType, "google", modelId);
 
-      return NextResponse.json({
+      return respondWithImage({
         image: toDataUrl(base64, mediaType),
         blobUrl,
       });
@@ -251,9 +291,11 @@ export async function POST(req: Request) {
 
     const openaiKey = requestApiKey || process.env.OPENAI_API_KEY;
     if (!openaiKey) {
-      return NextResponse.json(
-        { error: "Missing OPENAI_API_KEY." },
-        { status: 500 }
+      return applyFreeCookie(
+        NextResponse.json(
+          { error: "Missing OPENAI_API_KEY." },
+          { status: 500 }
+        )
       );
     }
 
@@ -274,15 +316,17 @@ export async function POST(req: Request) {
     const mediaType = image?.mediaType ?? images?.[0]?.mediaType ?? "image/png";
 
     if (!base64) {
-      return NextResponse.json(
-        { error: "No image returned from model." },
-        { status: 502 }
+      return applyFreeCookie(
+        NextResponse.json(
+          { error: "No image returned from model." },
+          { status: 502 }
+        )
       );
     }
 
     const blobUrl = await saveToBlob(base64, mediaType, "openai", modelId);
 
-    return NextResponse.json({
+    return respondWithImage({
       image: toDataUrl(base64, mediaType),
       blobUrl,
     });
@@ -301,18 +345,21 @@ export async function POST(req: Request) {
 
     console.error("Image generation failed:", error);
 
-    return NextResponse.json(
-      {
-        error: message,
-        statusCode: isDev ? errorInfo?.statusCode : undefined,
-        responseBody: isDev
-          ? errorInfo?.responseBody
-            ? JSON.stringify(errorInfo.responseBody)
-            : undefined
-          : undefined,
-        details: isDev && errorInfo?.cause ? String(errorInfo.cause) : undefined,
-      },
-      { status: 500 }
+    return applyFreeCookie(
+      NextResponse.json(
+        {
+          error: message,
+          statusCode: isDev ? errorInfo?.statusCode : undefined,
+          responseBody: isDev
+            ? errorInfo?.responseBody
+              ? JSON.stringify(errorInfo.responseBody)
+              : undefined
+            : undefined,
+          details:
+            isDev && errorInfo?.cause ? String(errorInfo.cause) : undefined,
+        },
+        { status: 500 }
+      )
     );
   }
 }

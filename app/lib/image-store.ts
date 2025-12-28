@@ -6,7 +6,7 @@ type ImageRecord = {
   generated?: Blob;
 };
 
-const DB_NAME = "img2coloringbook";
+const DB_NAME = "etch";
 const STORE_NAME = "images";
 const DB_VERSION = 1;
 

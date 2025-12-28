@@ -41,6 +41,17 @@ Notes:
 - If `IMAGE_PROVIDER` is not set, the app infers the provider from `IMAGE_MODEL`.
 - If `SAVE_TO_BLOB=true`, the API will save generated images to Vercel Blob and return a `blobUrl`.
 
+## Future Persistence (Roadmap)
+
+If we want generations to survive refreshes or multi-tab use, the next step is a
+server-side job flow:
+- Accept the request, store the original image + parameters in Blob, and return
+  a `jobId` immediately.
+- Process the generation in the background, then persist the result back to
+  Blob along with job status in a lightweight store (KV/Postgres/Redis).
+- Expose a `/api/coloring/status?jobId=...` endpoint and have the client poll or
+  subscribe (SSE) until the job completes, then hydrate the UI.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
