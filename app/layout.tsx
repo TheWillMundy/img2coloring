@@ -14,7 +14,7 @@ const body = Space_Grotesk({
 });
 
 export const metadata: Metadata = {
-  title: "Img2ColoringBook",
+  title: "Etch",
   description: "Turn photos into clean coloring book line art.",
 };
 
