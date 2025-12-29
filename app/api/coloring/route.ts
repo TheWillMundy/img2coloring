@@ -13,7 +13,10 @@ const DEFAULT_FULL_MODEL = `openai/${DEFAULT_IMAGE_MODEL}`;
 const FREE_GENERATION_COOKIE = "etch_free_generation";
 const FREE_GENERATION_MAX_AGE = 60 * 60 * 24 * 30;
 
-const OPENAI_SIZE_BY_RATIO: Record<string, string> = {
+type OpenAISize = `${number}x${number}`;
+
+const DEFAULT_OPENAI_SIZE: OpenAISize = "1536x1024";
+const OPENAI_SIZE_BY_RATIO: Record<string, OpenAISize> = {
   "1:1": "1024x1024",
   "3:2": "1536x1024",
   "2:3": "1024x1536",
@@ -301,7 +304,8 @@ export async function POST(req: NextRequest) {
 
     const openai = createOpenAI({ apiKey: openaiKey });
     const openaiSize =
-      (aspectRatio && OPENAI_SIZE_BY_RATIO[aspectRatio]) || "1024x1024";
+      (aspectRatio ? OPENAI_SIZE_BY_RATIO[aspectRatio] : undefined) ??
+      DEFAULT_OPENAI_SIZE;
 
     const { image, images } = await generateImage({
       model: openai.image(modelId),

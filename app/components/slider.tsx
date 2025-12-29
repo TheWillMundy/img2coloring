@@ -1,6 +1,12 @@
 "use client";
 
-import { type ReactNode, useEffect, useMemo, useRef } from "react";
+import {
+  type CSSProperties,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
 import gsap from "gsap";
 
 /**
@@ -326,7 +332,7 @@ export default function GSAPImageCompareSliderDemo({
   const containerClassName = fill
     ? "relative h-full w-full overflow-hidden rounded-3xl shadow-lg bg-neutral-100 select-none"
     : "relative w-full overflow-hidden rounded-3xl shadow-lg bg-neutral-100 select-none";
-  const containerStyle = fill
+  const containerStyle: CSSProperties = fill
     ? {
         height: "100%",
         width: "100%",

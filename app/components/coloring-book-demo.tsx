@@ -50,6 +50,8 @@ type ProcessedImage = {
   sourceUrl?: string;
 };
 
+type ProcessedImageWithBlob = ProcessedImage & { blob: Blob };
+
 type SampleSet = {
   id: string;
   name: string;
@@ -186,7 +188,7 @@ const loadImage = (file: File) => {
 const buildProcessedImage = async (
   file: File,
   id: string
-): Promise<ProcessedImage> => {
+): Promise<ProcessedImageWithBlob> => {
   const image = await loadImage(file);
   const sourceWidth = image.naturalWidth || image.width;
   const sourceHeight = image.naturalHeight || image.height;
@@ -381,21 +383,28 @@ const writeFreeGenerationUsed = () => {
   }
 };
 
-const readPendingGenerationIds = () => {
-  if (typeof window === "undefined") return [] as string[];
+const readPendingGenerationIds = (): string[] => {
+  if (typeof window === "undefined") return [];
   try {
     const raw = window.localStorage.getItem(PENDING_GENERATION_KEY);
     if (!raw) return [];
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) {
-      return parsed.filter((entry) => typeof entry === "string");
+      return parsed.filter(
+        (entry: unknown): entry is string => typeof entry === "string"
+      );
     }
-    if (parsed && Array.isArray(parsed.ids)) {
-      return parsed.ids.filter((entry: unknown) => typeof entry === "string");
+    if (parsed && typeof parsed === "object") {
+      const ids = (parsed as { ids?: unknown }).ids;
+      if (Array.isArray(ids)) {
+        return ids.filter(
+          (entry: unknown): entry is string => typeof entry === "string"
+        );
+      }
     }
     return [];
   } catch {
-    return [] as string[];
+    return [];
   }
 };
 
